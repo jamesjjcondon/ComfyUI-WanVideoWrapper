@@ -132,39 +132,42 @@ class WanVideoDecodeOviAudio:
         if audio_latents is None:
             raise ValueError("No Ovi audio latents found in input samples")
 
-        # Ensure tensor
         if not isinstance(audio_latents, torch.Tensor):
             audio_latents = torch.tensor(audio_latents)
 
-        # MMAudio VAE expects shape [B, 20, L]
+        # MMAudio VAE expects [B, 20, L]
         if audio_latents.ndim == 2:
-            # Common case: [L, 20] or [20, L]
             if audio_latents.shape[1] == 20:
-                # [L, 20] -> [B=1, C=20, L]
-                z = audio_latents.transpose(0, 1).unsqueeze(0)
+                z = audio_latents.transpose(0, 1).unsqueeze(0)   # [L,20] -> [1,20,L]
             elif audio_latents.shape[0] == 20:
-                # [20, L] -> [B=1, C=20, L]
-                z = audio_latents.unsqueeze(0)
+                z = audio_latents.unsqueeze(0)                   # [20,L] -> [1,20,L]
             else:
-                raise ValueError(f"Unexpected 2D latent shape {audio_latents.shape}, "
-                                 "expected (L,20) or (20,L)")
+                raise ValueError(f"Unexpected 2D latent shape {audio_latents.shape}")
         elif audio_latents.ndim == 3:
-            # Try to coerce to [B, 20, L]
             if audio_latents.shape[1] == 20:
                 z = audio_latents
             elif audio_latents.shape[2] == 20:
-                z = audio_latents.permute(0, 2, 1)
+                z = audio_latents.permute(0, 2, 1)               # [B,L,20] -> [B,20,L]
             else:
-                raise ValueError(f"Unexpected 3D latent shape {audio_latents.shape}, "
-                                 "expected channels dimension of 20")
+                raise ValueError(f"Unexpected 3D latent shape {audio_latents.shape}")
         else:
             raise ValueError(f"Unexpected latent ndim {audio_latents.ndim}, expected 2 or 3")
 
         mmaudio_vae.to(device)
-
         z = z.to(device=device, dtype=mmaudio_vae.dtype)
+
         waveform = mmaudio_vae.wrapped_decode(z)
-        audio = {"waveform": waveform.cpu().float(), "sample_rate": 16000}
+
+        # Normalise shape for Comfy AUDIO; assume [B, T] or [B, 1, T]
+        waveform = waveform.detach().cpu()
+
+        if waveform.ndim == 3 and waveform.shape[1] == 1:
+            waveform = waveform[:, 0, :]        # [B,1,T] -> [B,T]
+        if waveform.ndim == 2 and waveform.shape[0] == 1:
+            # [1,T] is fine; Comfy usually copes with [C,T] or [T]
+            waveform = waveform
+
+        audio = {"waveform": waveform.float(), "sample_rate": 16000}
 
         mmaudio_vae.to(offload_device)
         mm.soft_empty_cache()
@@ -187,22 +190,62 @@ class WanVideoEncodeOviAudio:
     CATEGORY = "WanVideoWrapper/Ovi"
 
     def decode(self, mmaudio_vae, audio):
-
         mmaudio_vae.to(device)
 
         waveform = audio.get("waveform", None)
         sample_rate = audio.get("sample_rate", None)
+
+        if waveform is None or sample_rate is None:
+            raise ValueError("WanVideoEncodeOviAudio: audio dict must contain 'waveform' and 'sample_rate'")
+
+        # Move to float32 on CPU for torchaudio, then to GPU
+        waveform = waveform.detach().cpu().float()
+
+        # Accept a few common shapes and convert to [1, T] mono
+        # Possible shapes:
+        #   [T]
+        #   [C, T]
+        #   [B, C, T]
+        if waveform.ndim == 1:
+            # [T] -> [1, T]
+            waveform = waveform.unsqueeze(0)
+        elif waveform.ndim == 2:
+            # [C, T] -> mixdown to mono [1, T]
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+        elif waveform.ndim == 3:
+            # [B, C, T] -> take first batch, mixdown channels -> [1, T]
+            waveform = waveform[0]
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+        else:
+            raise ValueError(f"WanVideoEncodeOviAudio: Unexpected waveform shape {waveform.shape}")
+
+        # Resample to 16 kHz if needed
         if sample_rate != 16000:
             waveform = torchaudio.functional.resample(waveform, sample_rate, 16000)
-        waveform = waveform.to(device=device, dtype=mmaudio_vae.dtype)[0][0].unsqueeze(0)
+
+        # Now waveform is [1, T]
+        waveform = waveform.to(device=device, dtype=mmaudio_vae.dtype)
+
+        # MMAudio expects [B, T] / [B, 1, T] depending on implementation.
+        # If your VAE expects [B, T], just squeeze channel dim if present.
+        if waveform.ndim == 2:
+            # [1, T] – fine
+            pass
+        elif waveform.ndim == 3 and waveform.shape[1] == 1:
+            # [1, 1, T] -> [1, T]
+            waveform = waveform[:, 0, :]
+        else:
+            raise ValueError(f"WanVideoEncodeOviAudio: waveform after processing has unexpected shape {waveform.shape}")
 
         samples = mmaudio_vae.wrapped_encode(waveform)
 
         mmaudio_vae.to(offload_device)
         mm.soft_empty_cache()
 
+        # samples should be [B, 20, L] for your sampler
         return ({"latent_ovi_audio": samples},)
-
 
 class WanVideoAddOviAudioToLatents:
     @classmethod

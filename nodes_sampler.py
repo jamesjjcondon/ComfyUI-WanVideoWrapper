@@ -1485,8 +1485,8 @@ class WanVideoSampler:
                         # vace / attn_cond helpers if they are tensors
                         if isinstance(vace_data, torch.Tensor):
                             vace_data = vace_data.to(device=device, dtype=dtype)
-                        if isinstance(attn_cond, torch.Tensor):
-                            attn_cond = attn_cond.to(device=device, dtype=dtype)
+                        if isinstance(add_cond, torch.Tensor):
+                            add_cond = add_cond.to(device=device, dtype=dtype)
 
                         # move context embeds to device (mirrors how other branches usually do it)
                         if isinstance(positive_embeds, dict):
@@ -1500,7 +1500,7 @@ class WanVideoSampler:
                         noise_pred_cond, noise_pred_ovi, cache_state_cond = transformer(
                             context=positive_embeds,
                             pred_id=cache_state[0] if cache_state else None,
-                            vace_data=vace_data, attn_cond=attn_cond,
+                            vace_data=vace_data, attn_cond=add_cond,
                             **base_params
                         )
                         noise_pred_cond = noise_pred_cond[0]
