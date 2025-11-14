@@ -132,15 +132,45 @@ class WanVideoDecodeOviAudio:
         if audio_latents is None:
             raise ValueError("No Ovi audio latents found in input samples")
 
+        # Ensure tensor
+        if not isinstance(audio_latents, torch.Tensor):
+            audio_latents = torch.tensor(audio_latents)
+
+        # MMAudio VAE expects shape [B, 20, L]
+        if audio_latents.ndim == 2:
+            # Common case: [L, 20] or [20, L]
+            if audio_latents.shape[1] == 20:
+                # [L, 20] -> [B=1, C=20, L]
+                z = audio_latents.transpose(0, 1).unsqueeze(0)
+            elif audio_latents.shape[0] == 20:
+                # [20, L] -> [B=1, C=20, L]
+                z = audio_latents.unsqueeze(0)
+            else:
+                raise ValueError(f"Unexpected 2D latent shape {audio_latents.shape}, "
+                                 "expected (L,20) or (20,L)")
+        elif audio_latents.ndim == 3:
+            # Try to coerce to [B, 20, L]
+            if audio_latents.shape[1] == 20:
+                z = audio_latents
+            elif audio_latents.shape[2] == 20:
+                z = audio_latents.permute(0, 2, 1)
+            else:
+                raise ValueError(f"Unexpected 3D latent shape {audio_latents.shape}, "
+                                 "expected channels dimension of 20")
+        else:
+            raise ValueError(f"Unexpected latent ndim {audio_latents.ndim}, expected 2 or 3")
+
         mmaudio_vae.to(device)
 
-        waveform = mmaudio_vae.wrapped_decode(audio_latents.to(device=device, dtype=mmaudio_vae.dtype))
+        z = z.to(device=device, dtype=mmaudio_vae.dtype)
+        waveform = mmaudio_vae.wrapped_decode(z)
         audio = {"waveform": waveform.cpu().float(), "sample_rate": 16000}
 
         mmaudio_vae.to(offload_device)
         mm.soft_empty_cache()
 
         return (audio,)
+
 
 class WanVideoEncodeOviAudio:
     @classmethod
@@ -210,7 +240,7 @@ class WanVideoEmptyMMAudioLatents:
     def decode(self, length):
         audio_latents = torch.zeros(
             (1, 20, length),
-            device=torch.device("cpu"),
+            device=device,
             dtype=torch.float32)  # 1, l c -> l, c
 
         return ({"latent_ovi_audio": audio_latents},)

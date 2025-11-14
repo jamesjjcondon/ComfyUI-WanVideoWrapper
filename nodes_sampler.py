@@ -520,13 +520,32 @@ class WanVideoSampler:
         noise_audio = latent_ovi = seq_len_ovi = None
         if transformer.audio_model is not None:
             noise_audio = samples.get("latent_ovi_audio", None) if samples is not None else None
+
             if noise_audio is not None:
+                # Coming from WanVideoEncodeOviAudio: usually [B, 20, L] or similar
                 if not torch.any(noise_audio):
-                    noise_audio = torch.randn(noise_audio.shape, device=torch.device("cpu"), dtype=torch.float32, generator=seed_g)
+                    # All zeros – replace with random noise on the *model* device
+                    noise_audio = torch.randn(
+                        noise_audio.shape,
+                        device=device,
+                        dtype=dtype,
+                        generator=seed_g,
+                    )
                 else:
-                    noise_audio = noise_audio.squeeze().movedim(0, 1).to(device, dtype)
+                    # Ensure [T, C] (T=L, C=20)
+                    noise_audio = noise_audio.squeeze().movedim(0, 1)
             else:
-                noise_audio = torch.randn((157, 20), device=torch.device("cpu"), dtype=torch.float32, generator=seed_g)  # T C
+                # No audio latents: create default on *model* device
+                noise_audio = torch.randn(
+                    (157, 20),  # T, C
+                    device=device,
+                    dtype=dtype,
+                    generator=seed_g,
+                )
+
+            # FINAL guard – everything that goes into the model must be on the same device/dtype
+            noise_audio = noise_audio.to(device=device, dtype=dtype)
+
             log.info(f"Ovi audio latent shape: {noise_audio.shape}")
             latent_ovi = noise_audio
             seq_len_ovi = noise_audio.shape[0]
@@ -1446,6 +1465,38 @@ class WanVideoSampler:
                         if pos_latent is not None: # for humo
                             base_params['x'] = [torch.cat([z[:, :-humo_reference_count], pos_latent], dim=1)]
                         base_params["add_text_emb"] = qwenvl_embeds_pos.to(device) if qwenvl_embeds_pos is not None else None # QwenVL embeddings for Bindweave
+                        
+                                # --- ensure all tensors in base_params / context are on the model device ---
+                        # x: list of latent tensors
+                        if "x" in base_params and base_params["x"] is not None:
+                            base_params["x"] = [
+                                t.to(device=device, dtype=dtype) for t in base_params["x"]
+                            ]
+
+                        # Ovi audio latent, if present (common names are "x_ovi" or "latent_ovi_audio")
+                        if "x_ovi" in base_params and base_params["x_ovi"] is not None:
+                            base_params["x_ovi"] = base_params["x_ovi"].to(device=device, dtype=dtype)
+
+                        if "latent_ovi_audio" in base_params and base_params["latent_ovi_audio"] is not None:
+                            base_params["latent_ovi_audio"] = base_params["latent_ovi_audio"].to(
+                                device=device, dtype=dtype
+                            )
+
+                        # vace / attn_cond helpers if they are tensors
+                        if isinstance(vace_data, torch.Tensor):
+                            vace_data = vace_data.to(device=device, dtype=dtype)
+                        if isinstance(attn_cond, torch.Tensor):
+                            attn_cond = attn_cond.to(device=device, dtype=dtype)
+
+                        # move context embeds to device (mirrors how other branches usually do it)
+                        if isinstance(positive_embeds, dict):
+                            positive_embeds = {
+                                k: (v.to(device=device, dtype=dtype) if torch.is_tensor(v) else v)
+                                for k, v in positive_embeds.items()
+                            }
+                        elif torch.is_tensor(positive_embeds):
+                            positive_embeds = positive_embeds.to(device=device, dtype=dtype)
+                        
                         noise_pred_cond, noise_pred_ovi, cache_state_cond = transformer(
                             context=positive_embeds,
                             pred_id=cache_state[0] if cache_state else None,
