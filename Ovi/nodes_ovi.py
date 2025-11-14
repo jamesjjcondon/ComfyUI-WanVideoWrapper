@@ -208,7 +208,10 @@ class WanVideoEmptyMMAudioLatents:
     CATEGORY = "WanVideoWrapper/Ovi"
 
     def decode(self, length):
-        audio_latents = torch.zeros((length, 20), device=torch.device("cpu"), dtype=torch.float32)  # 1, l c -> l, c
+        audio_latents = torch.zeros(
+            (1, 20, length),
+            device=torch.device("cpu"),
+            dtype=torch.float32)  # 1, l c -> l, c
 
         return ({"latent_ovi_audio": audio_latents},)
 
